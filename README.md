@@ -27,7 +27,7 @@ and clearly indicates whether the displayed data is **Live** or from **Cache**.
 
 - iOS / iPadOS
 - [Scriptable](https://scriptable.app)
-- [Pi-hole](https://pi-hole.net) (v6)
+- [Pi-hole](https://github.com/pi-hole/pi-hole) (v6)
 - Pi-hole reachable from your local network
 
 
