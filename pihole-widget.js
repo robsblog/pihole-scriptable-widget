@@ -7,8 +7,8 @@
 // - Refresh hint every 6 hours
 
 // ---------------- CONFIG ----------------
-// Prefer IP to avoid DNS issues on iOS ("pi.hole" sometimes doesn't resolve)
-const PIHOLE_BASE = "http://pi.hole"; // e.g. "http://192.168.178.10"
+// Prefer IP to avoid DNS issues on iOS
+const PIHOLE_BASE = "YOUR_LOCAL_PIHOLE_IP"; // e.g. "http://192.168.178.10"
 const STATS_ENDPOINT = "/api/stats/summary";
 
 const REFRESH_HOURS = 6;
@@ -335,22 +335,21 @@ function buildLarge(w, s, isLive) {
   addFooter(w, isLive, s.fetchedAt);
 }
 
-function buildWidget(summary, isLive) {
+function buildWidget(summary, isLive, forcedFamily = null) {
   const w = new ListWidget();
 
   addHeader(w, isLive, summary.fetchedAt);
 
-  // Layout by widget family
-  const family = config.widgetFamily; // "small" | "medium" | "large" | null (in preview)
+  const family = forcedFamily ?? config.widgetFamily;
   if (family === "small") buildSmall(w, summary);
   else if (family === "large") buildLarge(w, summary, isLive);
-  else buildMedium(w, summary); // default
+  else buildMedium(w, summary);
 
-  // Refresh hint
   w.refreshAfterDate = new Date(Date.now() + REFRESH_HOURS * 3600 * 1000);
 
-  // Tap action: open Pi-hole admin UI
-  w.url = `${PIHOLE_BASE}/admin/`;
+  // optional: Tap-Behaviour
+  const scriptName = encodeURIComponent(Script.name());
+  w.url = `scriptable:///run?scriptName=${scriptName}&action=refresh`;
 
   return w;
 }
@@ -370,17 +369,20 @@ async function presentMenuAndReturnAction() {
 
 // ---------------- Main ----------------
 (async () => {
-  // When running in app, offer a small menu. When running as widget, just run.
-  if (!config.runsInWidget) {
+  const actionParam = args.queryParameters?.action ?? null;
+  const isTapRefresh = actionParam === "refresh";
+
+ // When launched by tapping the widget (action=refresh), skip menu and refresh immediately.
+// Otherwise show the admin menu when running in the app.
+  if (!config.runsInWidget && !isTapRefresh) {
     const action = await presentMenuAndReturnAction();
     if (action === 1) {
       resetPassword();
-      // ask again immediately to validate flow
       await getOrAskPassword();
     } else if (action === 2) {
       clearCache();
     } else if (action === -1) {
-      // show preview anyway with whatever cache exists
+    // show preview anyway with whatever cache exists
     }
   }
 
@@ -423,14 +425,17 @@ async function presentMenuAndReturnAction() {
     }
   }
 
-  const widget = buildWidget(summary, isLive);
+  let widget;
 
-  if (config.runsInWidget) {
-    Script.setWidget(widget);
-  } else {
-    // Preview: choose a size to validate
-    await widget.presentMedium();
-  }
+if (config.runsInWidget) {
+  // IMPORTANT: Do NOT force a family here. iOS decides the widget size.
+  widget = buildWidget(summary, isLive);
+  Script.setWidget(widget);
+} else {
+  // App preview: force Large layout for validation
+  widget = buildWidget(summary, isLive, "large");
+  await widget.presentLarge();
+}
 
-  Script.complete();
+Script.complete();
 })();
