@@ -3,8 +3,8 @@
 // - Password stored in Keychain (prompt on first run; reset option)
 // - Small/Medium/Large widget layouts (auto by widget family)
 // - Shows Live vs Cache + last-updated timestamp
-// - Interactive menu when run in app: Refresh, Change Password, Clear Cache
-// - Refresh hint every 6 hours
+// - Interactive menu when run in app: Refresh, Change Password, Clear Cache, Language
+// - Auto language (DE for German systems / DACH region), English fallback; manual override supported
 
 // ---------------- CONFIG ----------------
 // Prefer IP to avoid DNS issues on iOS
@@ -18,45 +18,233 @@ const TIMEOUT_STATS = 10;
 // Storage keys
 const KEYCHAIN_PASSWORD_KEY = "pihole_admin_password_v1";
 const CACHE_KEY = "pihole_widget_cache_v6_enhanced_v1";
+const KEYCHAIN_LANG_KEY = "pihole_widget_lang_v1"; // "auto" | "de" | "en"
 // ----------------------------------------
+
+// ---------------- i18n ----------------
+const I18N = {
+  de: {
+    // generic
+    ok: "OK",
+    cancel: "Abbrechen",
+
+    // language
+    lang_auto: "Automatisch",
+    lang_de: "Deutsch",
+    lang_en: "Englisch",
+    choose_language_title: "Sprache",
+    choose_language_msg: "Welche Sprache soll das Widget nutzen?",
+    language_set_to: "Sprache gesetzt: {{lang}}",
+
+    // password prompt
+    pw_title: "Pi-hole Passwort speichern",
+    pw_msg: "Gib dein Pi-hole Admin-Passwort ein. Es wird lokal in der iOS-Keychain gespeichert.",
+    pw_field: "Passwort",
+    pw_save: "Speichern",
+    pw_cancelled: "Passwort-Eingabe abgebrochen.",
+    pw_empty: "Leeres Passwort eingegeben.",
+
+    // menu
+    menu_title: "Pi-hole Widget",
+    menu_msg: "Aktion auswählen",
+    menu_refresh: "Aktualisieren (API abrufen)",
+    menu_pw_change: "Passwort ändern (Keychain)",
+    menu_cache_clear: "Cache löschen",
+    menu_language: "Sprache ändern",
+    menu_abort: "Abbrechen",
+
+    // errors
+    err_pihole_unreachable_title: "Pi-hole nicht erreichbar",
+    err_pihole_unreachable_msg:
+      "Es werden die letzten bekannten Werte angezeigt.\n\nFehler: {{err}}",
+
+    // widget labels
+    title: "Pi-hole",
+    live: "Live",
+    cache: "Cache",
+    status_age: "Stand: {{age}}",
+    footer: "{{mode}} • letztes Update {{time}} • {{age}}",
+
+    // metrics
+    blocking_rate: "Blockrate",
+    total_queries: "Gesamtanfragen",
+    queries_blocked: "Blockierte Anfragen",
+    domains_on_list: "Domains auf der Blockliste",
+    forwarded: "Weitergeleitet",
+    cached: "Gecacht",
+    clients: "Clients",
+    unique_domains: "Eindeutige Domains",
+
+    // small widget labels
+    small_blocked: "Blockiert: {{n}}",
+    small_total: "Gesamt: {{n}}",
+
+    // time / age strings
+    no_timestamp: "kein Zeitstempel",
+    unknown: "unbekannt",
+    just_now: "gerade eben",
+    minutes_ago: "vor {{n}} Min",
+    hours_ago: "vor {{n}} Std",
+    days_ago: "vor {{n}} Tg"
+  },
+
+  en: {
+    ok: "OK",
+    cancel: "Cancel",
+
+    lang_auto: "Automatic",
+    lang_de: "German",
+    lang_en: "English",
+    choose_language_title: "Language",
+    choose_language_msg: "Which language should the widget use?",
+    language_set_to: "Language set to: {{lang}}",
+
+    pw_title: "Save Pi-hole password",
+    pw_msg: "Enter your Pi-hole admin password. It will be stored locally in the iOS Keychain.",
+    pw_field: "Password",
+    pw_save: "Save",
+    pw_cancelled: "Password entry cancelled.",
+    pw_empty: "Empty password entered.",
+
+    menu_title: "Pi-hole Widget",
+    menu_msg: "Choose an action",
+    menu_refresh: "Refresh (fetch API)",
+    menu_pw_change: "Change password (Keychain)",
+    menu_cache_clear: "Clear cache",
+    menu_language: "Change language",
+    menu_abort: "Cancel",
+
+    err_pihole_unreachable_title: "Pi-hole unreachable",
+    err_pihole_unreachable_msg: "Showing last known values.\n\nError: {{err}}",
+
+    title: "Pi-hole",
+    live: "Live",
+    cache: "Cache",
+    status_age: "Updated: {{age}}",
+    footer: "{{mode}} • last update {{time}} • {{age}}",
+
+    blocking_rate: "Blocking rate",
+    total_queries: "Total queries",
+    queries_blocked: "Queries blocked",
+    domains_on_list: "Domains on list",
+    forwarded: "Forwarded",
+    cached: "Cached",
+    clients: "Clients",
+    unique_domains: "Unique domains",
+
+    small_blocked: "Blocked: {{n}}",
+    small_total: "Total: {{n}}",
+
+    no_timestamp: "no timestamp",
+    unknown: "unknown",
+    just_now: "just now",
+    minutes_ago: "{{n}} min ago",
+    hours_ago: "{{n}}h ago",
+    days_ago: "{{n}}d ago",
+  }
+};
+
+function tmpl(s, vars = {}) {
+  return String(s).replace(/\{\{(\w+)\}\}/g, (_, k) => (vars[k] ?? ""));
+}
+
+function getStoredLang() {
+  try {
+    if (Keychain.contains(KEYCHAIN_LANG_KEY)) return Keychain.get(KEYCHAIN_LANG_KEY);
+  } catch (_) {}
+  return null;
+}
+
+function setStoredLang(val) {
+  try { Keychain.set(KEYCHAIN_LANG_KEY, val); } catch (_) {}
+}
+
+function detectLangAuto() {
+  // Scriptable provides Device.locale() like "de_DE", "en_US", etc.
+  // Device.language() often returns "de", "en", etc.
+  let loc = "";
+  let lang = "";
+  try { loc = (Device.locale?.() ?? "") + ""; } catch (_) {}
+  try { lang = (Device.language?.() ?? "") + ""; } catch (_) {}
+
+  loc = loc.replace("-", "_"); // normalize
+  const locLower = loc.toLowerCase();
+  const langLower = lang.toLowerCase();
+
+  // Primary: system language German
+  if (langLower === "de" || locLower.startsWith("de_")) return "de";
+
+  // Secondary: DACH region heuristic (works if locale contains region)
+  // Note: This is intentionally heuristic; users may have en_DE etc.
+  const region = (loc.split("_")[1] || "").toUpperCase();
+  if (["DE", "AT", "CH", "LI"].includes(region)) return "de";
+
+  return "en";
+}
+
+function getLang() {
+  const stored = (getStoredLang() || "auto").toLowerCase();
+  if (stored === "de" || stored === "en") return stored;
+  return detectLangAuto();
+}
+
+let LANG = getLang();
+let T = I18N[LANG] || I18N.en;
+
+function t(key, vars) {
+  const s = T[key] ?? (I18N.en[key] ?? key);
+  return tmpl(s, vars);
+}
+
+// Locale for number/date formatting
+function numberLocale() {
+  return LANG === "de" ? "de-DE" : "en-US";
+}
+function dateFormatterLocale() {
+  return LANG === "de" ? "de_DE" : "en_US";
+}
 
 // ---------------- Utilities ----------------
 function fmtInt(n) {
-  return new Intl.NumberFormat("de-DE").format(Number(n) || 0);
+  return new Intl.NumberFormat(numberLocale()).format(Number(n) || 0);
 }
 
 function fmtPct(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return "–";
-  return `${v.toFixed(1).replace(".", ",")} %`;
+  const num = new Intl.NumberFormat(numberLocale(), { minimumFractionDigits: 1, maximumFractionDigits: 1 }).format(v);
+  return `${num} %`;
 }
 
 function ageText(iso) {
-  if (!iso) return "kein Zeitstempel";
-  const t = new Date(iso).getTime();
-  if (!Number.isFinite(t)) return "unbekannt";
-  const diffMin = Math.round((Date.now() - t) / 60000);
-  if (diffMin < 1) return "gerade eben";
-  if (diffMin < 60) return `vor ${diffMin} Min`;
+  if (!iso) return t("no_timestamp");
+  const ts = new Date(iso).getTime();
+  if (!Number.isFinite(ts)) return t("unknown");
+
+  const diffMin = Math.round((Date.now() - ts) / 60000);
+  if (diffMin < 1) return t("just_now");
+  if (diffMin < 60) return t("minutes_ago", { n: diffMin });
+
   const diffH = Math.round(diffMin / 60);
-  if (diffH < 48) return `vor ${diffH} Std`;
-  return `vor ${Math.round(diffH / 24)} Tg`;
+  if (diffH < 48) return t("hours_ago", { n: diffH });
+
+  return t("days_ago", { n: Math.round(diffH / 24) });
 }
 
 function formatTime(iso) {
   if (!iso) return "–";
   const d = new Date(iso);
   const df = new DateFormatter();
-  df.locale = "de_DE";
+  df.locale = dateFormatterLocale();
   df.dateFormat = "HH:mm";
   return df.string(d);
 }
 
 function addFooter(w, isLive, fetchedAt) {
   w.addSpacer(5);
-
+  const mode = isLive ? t("live") : t("cache");
   const foot = w.addText(
-    `${isLive ? "Live" : "Cache"} • letztes Update ${formatTime(fetchedAt)} • ${ageText(fetchedAt)}`
+    t("footer", { mode, time: formatTime(fetchedAt), age: ageText(fetchedAt) })
   );
   foot.font = Font.systemFont(10);
   foot.textOpacity = 0.6;
@@ -106,17 +294,17 @@ async function getOrAskPassword() {
   }
 
   const a = new Alert();
-  a.title = "Pi-hole Passwort speichern";
-  a.message = "Gib dein Pi-hole Admin-Passwort ein. Es wird lokal in der iOS-Keychain gespeichert.";
-  a.addSecureTextField("Passwort");
-  a.addAction("Speichern");
-  a.addCancelAction("Abbrechen");
+  a.title = t("pw_title");
+  a.message = t("pw_msg");
+  a.addSecureTextField(t("pw_field"));
+  a.addAction(t("pw_save"));
+  a.addCancelAction(t("cancel"));
 
   const idx = await a.present();
-  if (idx === -1) throw new Error("Passwort-Eingabe abgebrochen.");
+  if (idx === -1) throw new Error(t("pw_cancelled"));
 
   const pw = a.textFieldValue(0);
-  if (!pw || !pw.trim()) throw new Error("Leeres Passwort eingegeben.");
+  if (!pw || !pw.trim()) throw new Error(t("pw_empty"));
 
   Keychain.set(KEYCHAIN_PASSWORD_KEY, pw);
   return pw;
@@ -126,6 +314,33 @@ function resetPassword() {
   try {
     if (Keychain.contains(KEYCHAIN_PASSWORD_KEY)) Keychain.remove(KEYCHAIN_PASSWORD_KEY);
   } catch (_) {}
+}
+
+// ---------------- Language chooser ----------------
+async function chooseLanguage() {
+  const a = new Alert();
+  a.title = t("choose_language_title");
+  a.message = t("choose_language_msg");
+  a.addAction(t("lang_auto")); // 0
+  a.addAction(t("lang_de"));   // 1
+  a.addAction(t("lang_en"));   // 2
+  a.addCancelAction(t("cancel"));
+
+  const idx = await a.present();
+  if (idx === -1) return;
+
+  const choice = idx === 1 ? "de" : idx === 2 ? "en" : "auto";
+  setStoredLang(choice);
+
+  // Apply immediately for in-app preview/menu session
+  LANG = getLang();
+  T = I18N[LANG] || I18N.en;
+
+  const b = new Alert();
+  b.title = t("choose_language_title");
+  b.message = t("language_set_to", { lang: choice.toUpperCase() });
+  b.addAction(t("ok"));
+  await b.present();
 }
 
 // ---------------- Pi-hole v6 API ----------------
@@ -170,13 +385,11 @@ function mapToWidgetFields(statsJson) {
   return {
     fetchedAt: new Date().toISOString(),
 
-    // Core (wie bisher)
     totalQueries: Number(q.total ?? 0),
     queriesBlocked: Number(q.blocked ?? 0),
     percentageBlocked: Number(q.percent_blocked ?? 0),
     domainsOnList: Number(g.domains_being_blocked ?? 0),
 
-    // Extra for Large
     forwarded: Number(q.forwarded ?? 0),
     cached: Number(q.cached ?? 0),
     uniqueDomains: Number(q.unique_domains ?? 0),
@@ -189,18 +402,18 @@ function addHeader(w, isLive, fetchedAt) {
   const head = w.addStack();
   head.layoutHorizontally();
 
-  const title = head.addText("Pi-hole");
+  const title = head.addText(t("title"));
   title.font = Font.boldSystemFont(16);
 
   head.addSpacer();
 
-  const badge = head.addText(isLive ? "Live" : "Cache");
+  const badge = head.addText(isLive ? t("live") : t("cache"));
   badge.font = Font.semiboldSystemFont(12);
   badge.textOpacity = isLive ? 1.0 : 0.7;
 
   w.addSpacer(6);
 
-  const sub = w.addText(`Stand: ${ageText(fetchedAt)}`);
+  const sub = w.addText(t("status_age", { age: ageText(fetchedAt) }));
   sub.font = Font.systemFont(10);
   sub.textOpacity = 0.7;
 
@@ -208,27 +421,24 @@ function addHeader(w, isLive, fetchedAt) {
 }
 
 function buildSmall(w, s) {
-  // % blocked dominant
   const big = w.addText(fmtPct(s.percentageBlocked));
   big.font = Font.boldSystemFont(22);
 
   w.addSpacer(8);
 
-  const b = w.addText(`Blocked: ${fmtInt(s.queriesBlocked)}`);
+  const b = w.addText(t("small_blocked", { n: fmtInt(s.queriesBlocked) }));
   b.font = Font.systemFont(12);
 
-  const t = w.addText(`Total: ${fmtInt(s.totalQueries)}`);
-  t.font = Font.systemFont(12);
+  const tt = w.addText(t("small_total", { n: fmtInt(s.totalQueries) }));
+  tt.font = Font.systemFont(12);
 }
 
 function buildMedium(w, s) {
-  // 1) Prominent: % blocked
   const pct = w.addText(fmtPct(s.percentageBlocked));
   pct.font = Font.boldSystemFont(26);
 
   w.addSpacer(6);
 
-  // 2) Two-column row: Total / Blocked
   const row = w.addStack();
   row.layoutHorizontally();
 
@@ -242,16 +452,14 @@ function buildMedium(w, s) {
   colR.layoutVertically();
   colR.size = new Size(colW, 0);
 
-  // Left column
-  const l1 = colL.addText("Total queries");
+  const l1 = colL.addText(t("total_queries"));
   l1.font = Font.systemFont(12);
   l1.textOpacity = 0.8;
 
   const v1 = colL.addText(fmtInt(s.totalQueries));
   v1.font = Font.semiboldSystemFont(16);
 
-  // Right column
-  const l2 = colR.addText("Queries blocked");
+  const l2 = colR.addText(t("queries_blocked"));
   l2.font = Font.systemFont(12);
   l2.textOpacity = 0.8;
 
@@ -260,8 +468,7 @@ function buildMedium(w, s) {
 
   w.addSpacer(6);
 
-  // 3) Meta line: Domains on list (one-line, low emphasis)
-  const meta = w.addText(`Domains on list: ${fmtInt(s.domainsOnList)}`);
+  const meta = w.addText(`${t("domains_on_list")}: ${fmtInt(s.domainsOnList)}`);
   meta.font = Font.systemFont(11);
   meta.textOpacity = 0.6;
 }
@@ -270,65 +477,59 @@ function buildLarge(w, s, isLive) {
   const pct = w.addText(fmtPct(s.percentageBlocked));
   pct.font = Font.boldSystemFont(28);
 
-  // Caption direkt an die % ran (Subline)
   w.addSpacer(2);
 
-  const hint = w.addText("Blocking rate");
+  const hint = w.addText(t("blocking_rate"));
   hint.font = Font.systemFont(10);
   hint.textOpacity = 0.35;
 
-  // danach der eigentliche Absatz
   w.addSpacer(16);
 
   const colW = 160;
 
-
-  // Row 1: Total / Blocked
   const row1 = w.addStack();
   row1.layoutHorizontally();
 
   const a = row1.addStack(); a.layoutVertically(); a.size = new Size(colW, 0);
   const b = row1.addStack(); b.layoutVertically(); b.size = new Size(colW, 0);
 
-  a.addText("Total queries").font = Font.systemFont(12);
+  a.addText(t("total_queries")).font = Font.systemFont(12);
   a.addText(fmtInt(s.totalQueries)).font = Font.semiboldSystemFont(16);
 
-  b.addText("Queries blocked").font = Font.systemFont(12);
+  b.addText(t("queries_blocked")).font = Font.systemFont(12);
   b.addText(fmtInt(s.queriesBlocked)).font = Font.semiboldSystemFont(16);
 
   w.addSpacer(10);
 
-  // Row 2: Forwarded / Cached
   const row2 = w.addStack();
   row2.layoutHorizontally();
 
   const c = row2.addStack(); c.layoutVertically(); c.size = new Size(colW, 0);
   const d = row2.addStack(); d.layoutVertically(); d.size = new Size(colW, 0);
 
-  c.addText("Forwarded").font = Font.systemFont(12);
+  c.addText(t("forwarded")).font = Font.systemFont(12);
   c.addText(fmtInt(s.forwarded)).font = Font.semiboldSystemFont(16);
 
-  d.addText("Cached").font = Font.systemFont(12);
+  d.addText(t("cached")).font = Font.systemFont(12);
   d.addText(fmtInt(s.cached)).font = Font.semiboldSystemFont(16);
 
   w.addSpacer(10);
 
-  // Row 3: Clients / Unique domains
   const row3 = w.addStack();
   row3.layoutHorizontally();
 
   const e = row3.addStack(); e.layoutVertically(); e.size = new Size(colW, 0);
   const f = row3.addStack(); f.layoutVertically(); f.size = new Size(colW, 0);
 
-  e.addText("Clients").font = Font.systemFont(12);
+  e.addText(t("clients")).font = Font.systemFont(12);
   e.addText(fmtInt(s.clientsTotal)).font = Font.semiboldSystemFont(16);
 
-  f.addText("Unique domains").font = Font.systemFont(12);
+  f.addText(t("unique_domains")).font = Font.systemFont(12);
   f.addText(fmtInt(s.uniqueDomains)).font = Font.semiboldSystemFont(16);
 
   w.addSpacer(10);
 
-  const meta = w.addText(`Domains on list: ${fmtInt(s.domainsOnList)}`);
+  const meta = w.addText(`${t("domains_on_list")}: ${fmtInt(s.domainsOnList)}`);
   meta.font = Font.systemFont(11);
   meta.textOpacity = 0.6;
 
@@ -347,7 +548,6 @@ function buildWidget(summary, isLive, forcedFamily = null) {
 
   w.refreshAfterDate = new Date(Date.now() + REFRESH_HOURS * 3600 * 1000);
 
-  // optional: Tap-Behaviour
   const scriptName = encodeURIComponent(Script.name());
   w.url = `scriptable:///run?scriptName=${scriptName}&action=refresh`;
 
@@ -357,14 +557,15 @@ function buildWidget(summary, isLive, forcedFamily = null) {
 // ---------------- In-app menu ----------------
 async function presentMenuAndReturnAction() {
   const a = new Alert();
-  a.title = "Pi-hole Widget";
-  a.message = "Aktion auswählen";
-  a.addAction("Refresh (API abrufen)");
-  a.addAction("Passwort ändern (Keychain)");
-  a.addAction("Cache löschen");
-  a.addCancelAction("Abbrechen");
+  a.title = t("menu_title");
+  a.message = t("menu_msg");
+  a.addAction(t("menu_refresh"));     // 0
+  a.addAction(t("menu_pw_change"));   // 1
+  a.addAction(t("menu_cache_clear")); // 2
+  a.addAction(t("menu_language"));    // 3
+  a.addCancelAction(t("menu_abort"));
   const idx = await a.present();
-  return idx; // 0 refresh, 1 reset pw, 2 clear cache, -1 cancel
+  return idx; // 0 refresh, 1 reset pw, 2 clear cache, 3 language, -1 cancel
 }
 
 // ---------------- Main ----------------
@@ -372,8 +573,8 @@ async function presentMenuAndReturnAction() {
   const actionParam = args.queryParameters?.action ?? null;
   const isTapRefresh = actionParam === "refresh";
 
- // When launched by tapping the widget (action=refresh), skip menu and refresh immediately.
-// Otherwise show the admin menu when running in the app.
+  // When launched by tapping the widget (action=refresh), skip menu and refresh immediately.
+  // Otherwise show the admin menu when running in the app.
   if (!config.runsInWidget && !isTapRefresh) {
     const action = await presentMenuAndReturnAction();
     if (action === 1) {
@@ -381,8 +582,10 @@ async function presentMenuAndReturnAction() {
       await getOrAskPassword();
     } else if (action === 2) {
       clearCache();
+    } else if (action === 3) {
+      await chooseLanguage();
     } else if (action === -1) {
-    // show preview anyway with whatever cache exists
+      // show preview anyway with whatever cache exists
     }
   }
 
@@ -400,42 +603,41 @@ async function presentMenuAndReturnAction() {
     saveCache(summary);
     isLive = true;
   } catch (e) {
-    // Fallback to cache
     summary = cached;
     isLive = false;
 
-    // If no cache exists, show zero state but still render widget
     if (!summary) {
       summary = {
         fetchedAt: null,
         totalQueries: 0,
         queriesBlocked: 0,
         percentageBlocked: 0,
-        domainsOnList: 0
+        domainsOnList: 0,
+        forwarded: 0,
+        cached: 0,
+        uniqueDomains: 0,
+        clientsTotal: 0,
       };
     }
 
-    // In app runs: show a helpful error
     if (!config.runsInWidget) {
       const a = new Alert();
-      a.title = "Pi-hole nicht erreichbar";
-      a.message = `Es werden die letzten bekannten Werte angezeigt.\n\nFehler: ${String(e)}`;
-      a.addAction("OK");
+      a.title = t("err_pihole_unreachable_title");
+      a.message = t("err_pihole_unreachable_msg", { err: String(e) });
+      a.addAction(t("ok"));
       await a.present();
     }
   }
 
   let widget;
 
-if (config.runsInWidget) {
-  // IMPORTANT: Do NOT force a family here. iOS decides the widget size.
-  widget = buildWidget(summary, isLive);
-  Script.setWidget(widget);
-} else {
-  // App preview: force Large layout for validation
-  widget = buildWidget(summary, isLive, "large");
-  await widget.presentLarge();
-}
+  if (config.runsInWidget) {
+    widget = buildWidget(summary, isLive);
+    Script.setWidget(widget);
+  } else {
+    widget = buildWidget(summary, isLive, "large");
+    await widget.presentLarge();
+  }
 
-Script.complete();
+  Script.complete();
 })();
