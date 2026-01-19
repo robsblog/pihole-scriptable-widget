@@ -22,7 +22,7 @@ status checks without opening the Pi-hole web interface.
 
 ## Screenshots
 
-![Screenshot](https://github.com/robsblog/pihole-scriptable-widget/blob/main/Screenshot%20-%20Widgets.jpg)
+![Screenshot](https://github.com/robsblog/pihole-scriptable-widget/blob/main/screenshot_widgets.png)
 
 
 ## Requirements
