@@ -4,15 +4,14 @@ An iOS home screen widget for **Scriptable** that displays key metrics from a
 local **Pi-hole** instance in a compact, readable format.
 
 The widget supports **Small**, **Medium**, and **Large** sizes, uses the
-**Pi-hole v6 API (session-based authentication)**, and is designed for quick
-status checks without opening the Pi-hole web interface.
+**Pi-hole v6 API (session-based authentication)**, and is designed for quick **health and status checks** without opening the Pi-hole web interface. 
 
 
 ## Key Features
 
 - Small / Medium / Large widget layouts (auto-selected by widget family)
 - Prominent display of **blocking percentage**
-- **Live vs Cache** status indicator
+- **Health status indicator** (OK / Suspicious / Error)
 - Timestamp and age of last successful update
 - Secure password storage via **iOS Keychain**
 - **Tap to Refresh**: tapping the widget triggers a data refresh
@@ -67,6 +66,21 @@ focused on status visibility.
 > Note: Actual refresh frequency is still subject to iOS widget scheduling.
 > The tap explicitly triggers a refresh attempt.
 
+## Health Status Indicator
+
+The widget shows a **single, consolidated health status** to indicate whether
+Pi-hole is operating as expected:
+
+- **OK** – Pi-hole is reachable and actively used by multiple clients
+- **Suspicious** – Pi-hole is running, but usage patterns look unusual
+  (for example, very few clients or unexpectedly low activity)
+- **Error** – Pi-hole is unreachable or not providing usable data
+
+The goal of this indicator is not strict monitoring, but **early visibility**
+into situations where Pi-hole might be bypassed or temporarily unavailable.
+
+Detailed metrics remain visible in the widget for manual inspection.
+
 
 ## Widget Layouts
 
@@ -85,7 +99,7 @@ focused on status visibility.
 - Total / Blocked queries
 - Forwarded / Cached queries
 - Clients and unique domains
-- Footer with **Live / Cache**, last update time, and age
+- Footer indicating whether data is live or cached, plus last update time and age
 
 
 ## Language Support (i18n)
