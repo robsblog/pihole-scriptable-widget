@@ -497,9 +497,17 @@ function addHeader(w, statusObj, isLive, fetchedAt) {
 
   head.addSpacer();
 
-  const badge = head.addText(statusLabel(statusObj.level));
+  // --- Status badge with background pill for better contrast ---
+  const badgeStack = head.addStack();
+  badgeStack.backgroundColor = new Color("#000000", 0.80); // dark pill with slight transparency
+  badgeStack.cornerRadius = 8;
+  badgeStack.setPadding(2, 8, 2, 8); // top, left, bottom, right
+
+  const badge = badgeStack.addText(statusLabel(statusObj.level));
   badge.font = Font.semiboldSystemFont(12);
   badge.textColor = statusColor(statusObj.level);
+  // ------------------------------------------------------------
+
 
   w.addSpacer(6);
 
