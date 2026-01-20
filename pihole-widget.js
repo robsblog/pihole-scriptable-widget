@@ -2,24 +2,32 @@
 // Features:
 // - Password stored in Keychain (prompt on first run; reset option)
 // - Small/Medium/Large widget layouts (auto by widget family)
-// - Shows Live vs Cache + last-updated timestamp
+// - Status badge: OK / Auffällig / Fehler (color-coded)
+// - Live vs Cache shown in footer + last-updated timestamp
 // - Interactive menu when run in app: Refresh, Change Password, Clear Cache, Language
 // - Auto language (DE for German systems / DACH region), English fallback; manual override supported
 
 // ---------------- CONFIG ----------------
 // Prefer IP to avoid DNS issues on iOS
-const PIHOLE_BASE = "YOUR_LOCAL_PIHOLE_IP"; // e.g. "http://192.168.178.10"
+const PIHOLE_BASE = "http://YOUR_LOCAL_PIHOLE_IP"; // e.g. "http://192.168.178.10"
 const STATS_ENDPOINT = "/api/stats/summary";
 
-const REFRESH_HOURS = 6;
+const REFRESH_HOURS = .5;
 const TIMEOUT_LOGIN = 10;
 const TIMEOUT_STATS = 10;
+
+// Status thresholds (tune to your environment)
+const STALE_WARN_MINUTES = 20;      // if API down, cache younger than this -> "Auffällig"
+const STALE_ERROR_MINUTES = 120;    // if API down, cache older than this -> "Fehler"
+const WARN_CLIENTS_MAX = 1;         // <= 1 client -> "Auffällig" (often DNS bypass / only router)
+const WARN_MIN_QUERY_DELTA = 10;    // if queries barely increase since last cache -> "Auffällig"
+const WARN_QUERY_DELTA_WINDOW_MIN = 30; // only evaluate delta if previous sample is within this window
+// ----------------------------------------
 
 // Storage keys
 const KEYCHAIN_PASSWORD_KEY = "pihole_admin_password_v1";
 const CACHE_KEY = "pihole_widget_cache_v6_enhanced_v1";
 const KEYCHAIN_LANG_KEY = "pihole_widget_lang_v1"; // "auto" | "de" | "en"
-// ----------------------------------------
 
 // ---------------- i18n ----------------
 const I18N = {
@@ -64,6 +72,17 @@ const I18N = {
     cache: "Cache",
     status_age: "Stand: {{age}}",
     footer: "{{mode}} • letztes Update {{time}} • {{age}}",
+
+    // status badge
+    status_ok: "OK",
+    status_warning: "Auffällig",
+    status_error: "Fehler",
+
+    // optional: status reasons (kept short)
+    status_reason_cache: "Cache-Werte",
+    status_reason_clients: "nur {{n}} Client",
+    status_reason_queries: "kaum neue Queries",
+    status_reason_offline: "API nicht erreichbar",
 
     // metrics
     blocking_rate: "Blockrate",
@@ -123,6 +142,16 @@ const I18N = {
     status_age: "Updated: {{age}}",
     footer: "{{mode}} • last update {{time}} • {{age}}",
 
+    // status badge
+    status_ok: "OK",
+    status_warning: "Suspicious",
+    status_error: "Error",
+
+    status_reason_cache: "cached values",
+    status_reason_clients: "only {{n}} client",
+    status_reason_queries: "low query activity",
+    status_reason_offline: "API unreachable",
+
     blocking_rate: "Blocking rate",
     total_queries: "Total queries",
     queries_blocked: "Queries blocked",
@@ -160,22 +189,17 @@ function setStoredLang(val) {
 }
 
 function detectLangAuto() {
-  // Scriptable provides Device.locale() like "de_DE", "en_US", etc.
-  // Device.language() often returns "de", "en", etc.
   let loc = "";
   let lang = "";
   try { loc = (Device.locale?.() ?? "") + ""; } catch (_) {}
   try { lang = (Device.language?.() ?? "") + ""; } catch (_) {}
 
-  loc = loc.replace("-", "_"); // normalize
+  loc = loc.replace("-", "_");
   const locLower = loc.toLowerCase();
   const langLower = lang.toLowerCase();
 
-  // Primary: system language German
   if (langLower === "de" || locLower.startsWith("de_")) return "de";
 
-  // Secondary: DACH region heuristic (works if locale contains region)
-  // Note: This is intentionally heuristic; users may have en_DE etc.
   const region = (loc.split("_")[1] || "").toUpperCase();
   if (["DE", "AT", "CH", "LI"].includes(region)) return "de";
 
@@ -196,7 +220,6 @@ function t(key, vars) {
   return tmpl(s, vars);
 }
 
-// Locale for number/date formatting
 function numberLocale() {
   return LANG === "de" ? "de-DE" : "en-US";
 }
@@ -216,12 +239,18 @@ function fmtPct(n) {
   return `${num} %`;
 }
 
+function minutesSince(iso) {
+  if (!iso) return null;
+  const ts = new Date(iso).getTime();
+  if (!Number.isFinite(ts)) return null;
+  return Math.round((Date.now() - ts) / 60000);
+}
+
 function ageText(iso) {
   if (!iso) return t("no_timestamp");
-  const ts = new Date(iso).getTime();
-  if (!Number.isFinite(ts)) return t("unknown");
+  const diffMin = minutesSince(iso);
+  if (diffMin === null) return t("unknown");
 
-  const diffMin = Math.round((Date.now() - ts) / 60000);
   if (diffMin < 1) return t("just_now");
   if (diffMin < 60) return t("minutes_ago", { n: diffMin });
 
@@ -238,16 +267,6 @@ function formatTime(iso) {
   df.locale = dateFormatterLocale();
   df.dateFormat = "HH:mm";
   return df.string(d);
-}
-
-function addFooter(w, isLive, fetchedAt) {
-  w.addSpacer(5);
-  const mode = isLive ? t("live") : t("cache");
-  const foot = w.addText(
-    t("footer", { mode, time: formatTime(fetchedAt), age: ageText(fetchedAt) })
-  );
-  foot.font = Font.systemFont(10);
-  foot.textOpacity = 0.6;
 }
 
 function loadCache() {
@@ -332,7 +351,6 @@ async function chooseLanguage() {
   const choice = idx === 1 ? "de" : idx === 2 ? "en" : "auto";
   setStoredLang(choice);
 
-  // Apply immediately for in-app preview/menu session
   LANG = getLang();
   T = I18N[LANG] || I18N.en;
 
@@ -397,8 +415,80 @@ function mapToWidgetFields(statsJson) {
   };
 }
 
+// ---------------- Status evaluation ----------------
+function statusColor(status) {
+  if (status === "ok") return Color.green();
+  if (status === "warning") return Color.orange();
+  return Color.red();
+}
+
+function statusLabel(status) {
+  if (status === "ok") return t("status_ok");
+  if (status === "warning") return t("status_warning");
+  return t("status_error");
+}
+
+// Returns { level: "ok"|"warning"|"error", reasonKey: string|null, reasonVars: object }
+function evaluateStatus(summary, isLive, cachedPrev) {
+  // If API is down, base status on cache age
+  if (!isLive) {
+    const ageMin = minutesSince(summary?.fetchedAt);
+    if (ageMin === null) return { level: "error", reasonKey: "status_reason_offline", reasonVars: {} };
+
+    if (ageMin >= STALE_ERROR_MINUTES) return { level: "error", reasonKey: "status_reason_offline", reasonVars: {} };
+    if (ageMin >= STALE_WARN_MINUTES) return { level: "warning", reasonKey: "status_reason_cache", reasonVars: {} };
+
+    // Cache is still fairly fresh, but it's still not live data
+    return { level: "warning", reasonKey: "status_reason_cache", reasonVars: {} };
+  }
+
+  // Live data: sanity checks
+  if ((summary?.totalQueries ?? 0) <= 0) {
+    return { level: "error", reasonKey: "status_reason_queries", reasonVars: {} };
+  }
+
+  // Common bypass symptom: only one active client (often the router)
+  if ((summary?.clientsTotal ?? 0) <= WARN_CLIENTS_MAX) {
+    return { level: "warning", reasonKey: "status_reason_clients", reasonVars: { n: String(summary?.clientsTotal ?? 0) } };
+  }
+
+  // Optional: compare to previous cached sample to detect "no activity"
+  // Only evaluate low activity if multiple clients are active
+  if (
+    summary?.clientsTotal >= 2 &&
+    cachedPrev?.fetchedAt &&
+    Number.isFinite(Number(cachedPrev?.totalQueries))
+  ) {
+    const prevAgeMin = minutesSince(cachedPrev.fetchedAt);
+    if (prevAgeMin !== null && prevAgeMin > 0 && prevAgeMin <= WARN_QUERY_DELTA_WINDOW_MIN) {
+      const delta = (summary.totalQueries ?? 0) - (cachedPrev.totalQueries ?? 0);
+      if (delta >= 0 && delta < WARN_MIN_QUERY_DELTA) {
+        return { level: "warning", reasonKey: "status_reason_queries", reasonVars: {} };
+      }
+    }
+  }
+
+
+  // Another soft signal: blockrate 0 can be normal, but often indicates bypass or upstream changes
+  if ((summary?.percentageBlocked ?? 0) === 0) {
+    return { level: "warning", reasonKey: "status_reason_queries", reasonVars: {} };
+  }
+
+  return { level: "ok", reasonKey: null, reasonVars: {} };
+}
+
 // ---------------- Widget UI ----------------
-function addHeader(w, isLive, fetchedAt) {
+function addFooter(w, isLive, fetchedAt) {
+  w.addSpacer(5);
+  const mode = isLive ? t("live") : t("cache");
+  const foot = w.addText(
+    t("footer", { mode, time: formatTime(fetchedAt), age: ageText(fetchedAt) })
+  );
+  foot.font = Font.systemFont(10);
+  foot.textOpacity = 0.6;
+}
+
+function addHeader(w, statusObj, isLive, fetchedAt) {
   const head = w.addStack();
   head.layoutHorizontally();
 
@@ -407,13 +497,22 @@ function addHeader(w, isLive, fetchedAt) {
 
   head.addSpacer();
 
-  const badge = head.addText(isLive ? t("live") : t("cache"));
+  const badge = head.addText(statusLabel(statusObj.level));
   badge.font = Font.semiboldSystemFont(12);
-  badge.textOpacity = isLive ? 1.0 : 0.7;
+  badge.textColor = statusColor(statusObj.level);
 
   w.addSpacer(6);
 
-  const sub = w.addText(t("status_age", { age: ageText(fetchedAt) }));
+  // Secondary line: age (+ optional short reason)
+  const age = t("status_age", { age: ageText(fetchedAt) });
+  let reason = "";
+  if (statusObj.reasonKey) {
+    reason = ` • ${t(statusObj.reasonKey, statusObj.reasonVars || {})}`;
+  } else if (!isLive) {
+    reason = ` • ${t("status_reason_cache")}`;
+  }
+
+  const sub = w.addText(`${age}${reason}`);
   sub.font = Font.systemFont(10);
   sub.textOpacity = 0.7;
 
@@ -473,7 +572,7 @@ function buildMedium(w, s) {
   meta.textOpacity = 0.6;
 }
 
-function buildLarge(w, s, isLive) {
+function buildLarge(w, s) {
   const pct = w.addText(fmtPct(s.percentageBlocked));
   pct.font = Font.boldSystemFont(28);
 
@@ -532,19 +631,19 @@ function buildLarge(w, s, isLive) {
   const meta = w.addText(`${t("domains_on_list")}: ${fmtInt(s.domainsOnList)}`);
   meta.font = Font.systemFont(11);
   meta.textOpacity = 0.6;
-
-  addFooter(w, isLive, s.fetchedAt);
 }
 
-function buildWidget(summary, isLive, forcedFamily = null) {
+function buildWidget(summary, statusObj, isLive, forcedFamily = null) {
   const w = new ListWidget();
 
-  addHeader(w, isLive, summary.fetchedAt);
+  addHeader(w, statusObj, isLive, summary.fetchedAt);
 
   const family = forcedFamily ?? config.widgetFamily;
   if (family === "small") buildSmall(w, summary);
-  else if (family === "large") buildLarge(w, summary, isLive);
+  else if (family === "large") buildLarge(w, summary);
   else buildMedium(w, summary);
+
+  addFooter(w, isLive, summary.fetchedAt);
 
   w.refreshAfterDate = new Date(Date.now() + REFRESH_HOURS * 3600 * 1000);
 
@@ -629,13 +728,15 @@ async function presentMenuAndReturnAction() {
     }
   }
 
-  let widget;
+  // Evaluate status (use previous cached sample to detect low activity)
+  const statusObj = evaluateStatus(summary, isLive, cached);
 
+  let widget;
   if (config.runsInWidget) {
-    widget = buildWidget(summary, isLive);
+    widget = buildWidget(summary, statusObj, isLive);
     Script.setWidget(widget);
   } else {
-    widget = buildWidget(summary, isLive, "large");
+    widget = buildWidget(summary, statusObj, isLive, "large");
     await widget.presentLarge();
   }
 
