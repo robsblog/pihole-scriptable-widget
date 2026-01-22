@@ -11,7 +11,7 @@ The widget supports **Small**, **Medium**, and **Large** sizes, uses the
 
 - Small / Medium / Large widget layouts (auto-selected by widget family)
 - Prominent display of **blocking percentage**
-- **Health status indicator** (OK / Suspicious / Error)
+- **Health status indicator** (OK / Suspicious / Offline / Error)
 - Timestamp and age of last successful update
 - Secure password storage via **iOS Keychain**
 - **Tap to Refresh**: tapping the widget triggers a data refresh
@@ -68,18 +68,22 @@ focused on status visibility.
 
 ## Health Status Indicator
 
-The widget shows a **single, consolidated health status** to indicate whether
-Pi-hole is operating as expected:
+The widget shows a **single, consolidated health status** to indicate the
+current connection and data quality state:
 
 - **OK** – Pi-hole is reachable and actively used by multiple clients
-- **Suspicious** – Pi-hole is running, but usage patterns look unusual
+- **Suspicious** – Pi-hole is reachable, but usage patterns look unusual
   (for example, very few clients or unexpectedly low activity)
-- **Error** – Pi-hole is unreachable or not providing usable data
+- **Offline** – Pi-hole is not reachable from the current network
+  (for example, when you are outside your home network)
+- **Error** – Pi-hole is reachable, but the API returns errors or unusable data
+  (for example, authentication or server-side issues)
 
 The goal of this indicator is not strict monitoring, but **early visibility**
-into situations where Pi-hole might be bypassed or temporarily unavailable.
+into situations where Pi-hole might be unavailable, bypassed, or misconfigured.
 
-Detailed metrics remain visible in the widget for manual inspection.
+If live data cannot be fetched, the widget automatically falls back to the
+last known cached values.
 
 
 ## Widget Layouts
@@ -151,9 +155,7 @@ Key configuration values in the script:
 ## Limitations
 
 - Widget refresh timing is ultimately controlled by iOS
-- The hostname may not resolve on all networks — using the IP address is recommended
-- Component update checks and historical metrics are not implemented (yet)
-
+- When Pi-hole is not reachable from the current network, the widget shows an "Offline" state and falls back to cached values
 
 ## Contributing
 
