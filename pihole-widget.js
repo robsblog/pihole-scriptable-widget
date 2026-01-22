@@ -2,17 +2,22 @@
 // Features:
 // - Password stored in Keychain (prompt on first run; reset option)
 // - Small/Medium/Large widget layouts (auto by widget family)
-// - Status badge: OK / Auffällig / Fehler (color-coded)
+// - Status badge: OK / Suspicious / Error / Offline (color-coded)
 // - Live vs Cache shown in footer + last-updated timestamp
 // - Interactive menu when run in app: Refresh, Change Password, Clear Cache, Language
 // - Auto language (DE for German systems / DACH region), English fallback; manual override supported
+//
+// Robust error handling:
+// - Distinguishes "Not connected" (transport/off-network) from real API errors
+// - Auto re-auth + retry once on HTTP 401 (SID hiccup / expired session)
+// - One lightweight retry for transient transport/5xx errors
 
 // ---------------- CONFIG ----------------
 // Prefer IP to avoid DNS issues on iOS
 const PIHOLE_BASE = "http://YOUR_LOCAL_PIHOLE_IP"; // e.g. "http://192.168.178.10"
 const STATS_ENDPOINT = "/api/stats/summary";
 
-const REFRESH_HOURS = .5;
+const REFRESH_HOURS = 0.5;
 const TIMEOUT_LOGIN = 10;
 const TIMEOUT_STATS = 10;
 
@@ -28,6 +33,17 @@ const WARN_QUERY_DELTA_WINDOW_MIN = 30; // only evaluate delta if previous sampl
 const KEYCHAIN_PASSWORD_KEY = "pihole_admin_password_v1";
 const CACHE_KEY = "pihole_widget_cache_v6_enhanced_v1";
 const KEYCHAIN_LANG_KEY = "pihole_widget_lang_v1"; // "auto" | "de" | "en"
+
+// Optional: cache SID to reduce auth churn (and avoid transient 401s)
+const KEYCHAIN_SID_KEY = "pihole_widget_sid_v1";
+
+// ---------------- Status ----------------
+const STATUS = {
+  OK: "ok",
+  SUSPICIOUS: "suspicious",
+  ERROR: "error",
+  OFFLINE: "offline", // transport / not connected to Pi-hole
+};
 
 // ---------------- i18n ----------------
 const I18N = {
@@ -61,10 +77,16 @@ const I18N = {
     menu_language: "Sprache ändern",
     menu_abort: "Abbrechen",
 
-    // errors
-    err_pihole_unreachable_title: "Pi-hole nicht erreichbar",
-    err_pihole_unreachable_msg:
-      "Es werden die letzten bekannten Werte angezeigt.\n\nFehler: {{err}}",
+    // errors (in-app)
+    err_not_connected_title: "Nicht mit Pi-hole verbunden",
+    err_not_connected_msg:
+      "Es werden die letzten bekannten Werte angezeigt.\n\nHinweis: {{err}}",
+    err_auth_title: "Nicht autorisiert",
+    err_auth_msg:
+      "Die Sitzung ist abgelaufen oder das Passwort ist nicht gültig.\n\nEs werden die letzten bekannten Werte angezeigt.\n\nFehler: {{err}}",
+    err_api_title: "API-Fehler",
+    err_api_msg:
+      "Pi-hole ist erreichbar, aber die API hat einen Fehler geliefert.\n\nEs werden die letzten bekannten Werte angezeigt.\n\nFehler: {{err}}",
 
     // widget labels
     title: "Pi-hole",
@@ -77,12 +99,15 @@ const I18N = {
     status_ok: "OK",
     status_warning: "Auffällig",
     status_error: "Fehler",
+    status_offline: "Offline",
 
     // optional: status reasons (kept short)
     status_reason_cache: "Cache-Werte",
     status_reason_clients: "nur {{n}} Client",
     status_reason_queries: "kaum neue Queries",
-    status_reason_offline: "API nicht erreichbar",
+    status_reason_offline: "nicht verbunden",
+    status_reason_api_error: "API-Fehler",
+    status_reason_unauthorized: "nicht autorisiert",
 
     // metrics
     blocking_rate: "Blockrate",
@@ -133,8 +158,15 @@ const I18N = {
     menu_language: "Change language",
     menu_abort: "Cancel",
 
-    err_pihole_unreachable_title: "Pi-hole unreachable",
-    err_pihole_unreachable_msg: "Showing last known values.\n\nError: {{err}}",
+    err_not_connected_title: "Not connected to Pi-hole",
+    err_not_connected_msg:
+      "Showing last known values.\n\nHint: {{err}}",
+    err_auth_title: "Unauthorized",
+    err_auth_msg:
+      "The session expired or the password is invalid.\n\nShowing last known values.\n\nError: {{err}}",
+    err_api_title: "API error",
+    err_api_msg:
+      "Pi-hole is reachable, but the API returned an error.\n\nShowing last known values.\n\nError: {{err}}",
 
     title: "Pi-hole",
     live: "Live",
@@ -146,11 +178,14 @@ const I18N = {
     status_ok: "OK",
     status_warning: "Suspicious",
     status_error: "Error",
+    status_offline: "Offline",
 
     status_reason_cache: "cached values",
     status_reason_clients: "only {{n}} client",
     status_reason_queries: "low query activity",
-    status_reason_offline: "API unreachable",
+    status_reason_offline: "not connected",
+    status_reason_api_error: "API error",
+    status_reason_unauthorized: "unauthorized",
 
     blocking_rate: "Blocking rate",
     total_queries: "Total queries",
@@ -286,6 +321,69 @@ function clearCache() {
   try { if (Keychain.contains(CACHE_KEY)) Keychain.remove(CACHE_KEY); } catch (_) {}
 }
 
+function loadSid() {
+  try {
+    if (!Keychain.contains(KEYCHAIN_SID_KEY)) return null;
+    return Keychain.get(KEYCHAIN_SID_KEY);
+  } catch (_) {
+    return null;
+  }
+}
+function saveSid(sid) {
+  try { Keychain.set(KEYCHAIN_SID_KEY, sid); } catch (_) {}
+}
+function clearSid() {
+  try { if (Keychain.contains(KEYCHAIN_SID_KEY)) Keychain.remove(KEYCHAIN_SID_KEY); } catch (_) {}
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function withRetry(fn, { retries = 1, delayMs = 300 } = {}) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i < retries) await sleep(delayMs);
+    }
+  }
+  throw lastErr;
+}
+
+class HttpError extends Error {
+  constructor(status, bodyText, url) {
+    super(`HTTP ${status}: ${bodyText}`);
+    this.name = "HttpError";
+    this.status = status;
+    this.bodyText = bodyText;
+    this.url = url;
+  }
+}
+
+function isTransportError(err) {
+  const msg = String(err?.message ?? err ?? "").toLowerCase();
+  const needles = [
+    "timed out",
+    "timeout",
+    "offline",
+    "not connected",
+    "could not connect",
+    "cannot connect",
+    "connection was lost",
+    "network is unreachable",
+    "unreachable",
+    "dns",
+    "enotfound",
+    "econn",
+    "socket",
+    "connection",
+  ];
+  return needles.some(n => msg.includes(n));
+}
+
 async function request({ url, method = "GET", headers = {}, bodyObj = null, timeoutSeconds = 10 }) {
   const req = new Request(url);
   req.method = method;
@@ -297,7 +395,7 @@ async function request({ url, method = "GET", headers = {}, bodyObj = null, time
     req.body = JSON.stringify(bodyObj);
   }
 
-  const text = await req.loadString();
+  const text = await req.loadString(); // may throw (transport/offline)
   const status = req.response?.statusCode ?? 0;
 
   let json = null;
@@ -371,7 +469,7 @@ async function loginGetSid(password) {
   });
 
   if (!(r.status >= 200 && r.status < 300)) {
-    throw new Error(`Login failed HTTP ${r.status}: ${(r.text || "").slice(0, 200)}`);
+    throw new HttpError(r.status, (r.text || "").slice(0, 300), `${PIHOLE_BASE}/api/auth`);
   }
 
   const sid = r.json?.session?.sid;
@@ -389,10 +487,52 @@ async function fetchStatsWithSid(sid) {
   });
 
   if (!(r.status >= 200 && r.status < 300) || !r.json) {
-    throw new Error(`Stats failed HTTP ${r.status}: ${(r.text || "").slice(0, 200)}`);
+    throw new HttpError(r.status, (r.text || "").slice(0, 300), url);
   }
 
   return r.json;
+}
+
+/**
+ * Robust stats fetch:
+ * - Try cached SID first (if present)
+ * - On 401: clear SID, re-login, retry once
+ * - On transient transport/5xx: retry once with small delay
+ */
+async function fetchStatsRobust(password) {
+  return await withRetry(async () => {
+    const sidCached = loadSid();
+
+    // 1) Try existing SID first
+    if (sidCached) {
+      try {
+        const j = await fetchStatsWithSid(sidCached);
+        return { statsJson: j, usedSid: sidCached, authRefreshed: false };
+      } catch (e) {
+        if (e instanceof HttpError && e.status === 401) {
+          clearSid(); // force re-auth
+        } else {
+          // For non-401 errors, bubble up (retry wrapper may retry once)
+          throw e;
+        }
+      }
+    }
+
+    // 2) Login + fetch
+    const sid = await loginGetSid(password);
+    saveSid(sid);
+
+    try {
+      const j = await fetchStatsWithSid(sid);
+      return { statsJson: j, usedSid: sid, authRefreshed: true };
+    } catch (e) {
+      // If we somehow get 401 immediately after login, clear SID and bubble up
+      if (e instanceof HttpError && e.status === 401) {
+        clearSid();
+      }
+      throw e;
+    }
+  }, { retries: 1, delayMs: 300 });
 }
 
 function mapToWidgetFields(statsJson) {
@@ -416,40 +556,67 @@ function mapToWidgetFields(statsJson) {
 }
 
 // ---------------- Status evaluation ----------------
-function statusColor(status) {
-  if (status === "ok") return Color.green();
-  if (status === "warning") return Color.orange();
+function statusColor(level) {
+  if (level === STATUS.OK) return Color.green();
+  if (level === STATUS.SUSPICIOUS) return Color.orange();
+  if (level === STATUS.OFFLINE) return new Color("#9AA0A6"); // neutral gray
   return Color.red();
 }
 
-function statusLabel(status) {
-  if (status === "ok") return t("status_ok");
-  if (status === "warning") return t("status_warning");
+function statusLabel(level) {
+  if (level === STATUS.OK) return t("status_ok");
+  if (level === STATUS.SUSPICIOUS) return t("status_warning");
+  if (level === STATUS.OFFLINE) return t("status_offline");
   return t("status_error");
 }
 
-// Returns { level: "ok"|"warning"|"error", reasonKey: string|null, reasonVars: object }
-function evaluateStatus(summary, isLive, cachedPrev) {
-  // If API is down, base status on cache age
+// Returns { level: STATUS.*, reasonKey: string|null, reasonVars: object }
+function evaluateStatus(summary, isLive, cachedPrev, offlineClass /* "not_connected"|"unauthorized"|"api_error"|null */) {
+  // Offline: show Offline unless cache is too old (then Error)
   if (!isLive) {
     const ageMin = minutesSince(summary?.fetchedAt);
-    if (ageMin === null) return { level: "error", reasonKey: "status_reason_offline", reasonVars: {} };
 
-    if (ageMin >= STALE_ERROR_MINUTES) return { level: "error", reasonKey: "status_reason_offline", reasonVars: {} };
-    if (ageMin >= STALE_WARN_MINUTES) return { level: "warning", reasonKey: "status_reason_cache", reasonVars: {} };
+    // No cache => error (nothing useful to show)
+    if (ageMin === null) {
+      const rk =
+        offlineClass === "unauthorized" ? "status_reason_unauthorized"
+        : offlineClass === "api_error" ? "status_reason_api_error"
+        : "status_reason_offline";
+      return { level: STATUS.ERROR, reasonKey: rk, reasonVars: {} };
+    }
 
-    // Cache is still fairly fresh, but it's still not live data
-    return { level: "warning", reasonKey: "status_reason_cache", reasonVars: {} };
+    // Cache very old => error
+    if (ageMin >= STALE_ERROR_MINUTES) {
+      const rk =
+        offlineClass === "unauthorized" ? "status_reason_unauthorized"
+        : offlineClass === "api_error" ? "status_reason_api_error"
+        : "status_reason_offline";
+      return { level: STATUS.ERROR, reasonKey: rk, reasonVars: {} };
+    }
+
+    // Cache is available and not too old: distinguish offline vs API error vs auth
+    if (offlineClass === "not_connected") {
+      return { level: STATUS.OFFLINE, reasonKey: "status_reason_offline", reasonVars: {} };
+    }
+    if (offlineClass === "unauthorized") {
+      return { level: STATUS.SUSPICIOUS, reasonKey: "status_reason_unauthorized", reasonVars: {} };
+    }
+    if (offlineClass === "api_error") {
+      return { level: STATUS.SUSPICIOUS, reasonKey: "status_reason_api_error", reasonVars: {} };
+    }
+
+    // Generic offline fallback (unknown cause): treat as Offline if cache is fresh
+    return { level: STATUS.OFFLINE, reasonKey: "status_reason_cache", reasonVars: {} };
   }
 
   // Live data: sanity checks
   if ((summary?.totalQueries ?? 0) <= 0) {
-    return { level: "error", reasonKey: "status_reason_queries", reasonVars: {} };
+    return { level: STATUS.ERROR, reasonKey: "status_reason_queries", reasonVars: {} };
   }
 
   // Common bypass symptom: only one active client (often the router)
   if ((summary?.clientsTotal ?? 0) <= WARN_CLIENTS_MAX) {
-    return { level: "warning", reasonKey: "status_reason_clients", reasonVars: { n: String(summary?.clientsTotal ?? 0) } };
+    return { level: STATUS.SUSPICIOUS, reasonKey: "status_reason_clients", reasonVars: { n: String(summary?.clientsTotal ?? 0) } };
   }
 
   // Optional: compare to previous cached sample to detect "no activity"
@@ -463,18 +630,17 @@ function evaluateStatus(summary, isLive, cachedPrev) {
     if (prevAgeMin !== null && prevAgeMin > 0 && prevAgeMin <= WARN_QUERY_DELTA_WINDOW_MIN) {
       const delta = (summary.totalQueries ?? 0) - (cachedPrev.totalQueries ?? 0);
       if (delta >= 0 && delta < WARN_MIN_QUERY_DELTA) {
-        return { level: "warning", reasonKey: "status_reason_queries", reasonVars: {} };
+        return { level: STATUS.SUSPICIOUS, reasonKey: "status_reason_queries", reasonVars: {} };
       }
     }
   }
 
-
   // Another soft signal: blockrate 0 can be normal, but often indicates bypass or upstream changes
   if ((summary?.percentageBlocked ?? 0) === 0) {
-    return { level: "warning", reasonKey: "status_reason_queries", reasonVars: {} };
+    return { level: STATUS.SUSPICIOUS, reasonKey: "status_reason_queries", reasonVars: {} };
   }
 
-  return { level: "ok", reasonKey: null, reasonVars: {} };
+  return { level: STATUS.OK, reasonKey: null, reasonVars: {} };
 }
 
 // ---------------- Widget UI ----------------
@@ -507,7 +673,6 @@ function addHeader(w, statusObj, isLive, fetchedAt) {
   badge.font = Font.semiboldSystemFont(12);
   badge.textColor = statusColor(statusObj.level);
   // ------------------------------------------------------------
-
 
   w.addSpacer(6);
 
@@ -675,6 +840,34 @@ async function presentMenuAndReturnAction() {
   return idx; // 0 refresh, 1 reset pw, 2 clear cache, 3 language, -1 cancel
 }
 
+function emptySummary() {
+  return {
+    fetchedAt: null,
+    totalQueries: 0,
+    queriesBlocked: 0,
+    percentageBlocked: 0,
+    domainsOnList: 0,
+    forwarded: 0,
+    cached: 0,
+    uniqueDomains: 0,
+    clientsTotal: 0,
+  };
+}
+
+function classifyOffline(err) {
+  if (isTransportError(err)) return { offlineClass: "not_connected", titleKey: "err_not_connected_title", msgKey: "err_not_connected_msg" };
+
+  if (err instanceof HttpError) {
+    if (err.status === 401 || err.status === 403) {
+      return { offlineClass: "unauthorized", titleKey: "err_auth_title", msgKey: "err_auth_msg" };
+    }
+    return { offlineClass: "api_error", titleKey: "err_api_title", msgKey: "err_api_msg" };
+  }
+
+  // Unknown: treat as API error (reachable but failed) rather than "not connected"
+  return { offlineClass: "api_error", titleKey: "err_api_title", msgKey: "err_api_msg" };
+}
+
 // ---------------- Main ----------------
 (async () => {
   const actionParam = args.queryParameters?.action ?? null;
@@ -687,6 +880,7 @@ async function presentMenuAndReturnAction() {
     if (action === 1) {
       resetPassword();
       await getOrAskPassword();
+      clearSid(); // password changed -> session invalid
     } else if (action === 2) {
       clearCache();
     } else if (action === 3) {
@@ -700,44 +894,39 @@ async function presentMenuAndReturnAction() {
 
   let summary = null;
   let isLive = false;
+  let offlineClass = null;
+  let lastErr = null;
 
   try {
     const password = await getOrAskPassword();
-    const sid = await loginGetSid(password);
-    const statsJson = await fetchStatsWithSid(sid);
 
-    summary = mapToWidgetFields(statsJson);
+    // Fetch with robust retry + auto re-auth on 401
+    const res = await fetchStatsRobust(password);
+
+    summary = mapToWidgetFields(res.statsJson);
     saveCache(summary);
     isLive = true;
   } catch (e) {
+    lastErr = e;
     summary = cached;
     isLive = false;
 
-    if (!summary) {
-      summary = {
-        fetchedAt: null,
-        totalQueries: 0,
-        queriesBlocked: 0,
-        percentageBlocked: 0,
-        domainsOnList: 0,
-        forwarded: 0,
-        cached: 0,
-        uniqueDomains: 0,
-        clientsTotal: 0,
-      };
-    }
+    if (!summary) summary = emptySummary();
+
+    const off = classifyOffline(e);
+    offlineClass = off.offlineClass;
 
     if (!config.runsInWidget) {
       const a = new Alert();
-      a.title = t("err_pihole_unreachable_title");
-      a.message = t("err_pihole_unreachable_msg", { err: String(e) });
+      a.title = t(off.titleKey);
+      a.message = t(off.msgKey, { err: String(e) });
       a.addAction(t("ok"));
       await a.present();
     }
   }
 
   // Evaluate status (use previous cached sample to detect low activity)
-  const statusObj = evaluateStatus(summary, isLive, cached);
+  const statusObj = evaluateStatus(summary, isLive, cached, offlineClass);
 
   let widget;
   if (config.runsInWidget) {
