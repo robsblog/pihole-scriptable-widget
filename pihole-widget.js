@@ -68,6 +68,7 @@ const I18N = {
     url_save: "Speichern",
     url_cancelled: "URL-Eingabe abgebrochen.",
     url_empty: "Keine URL eingegeben.",
+    url_not_configured: "Pi-hole URL nicht konfiguriert. Öffne das Skript in Scriptable, um sie einzugeben.",
 
     // password prompt
     pw_title: "Pi-hole Passwort speichern",
@@ -159,6 +160,7 @@ const I18N = {
     url_save: "Save",
     url_cancelled: "URL entry cancelled.",
     url_empty: "No URL entered.",
+    url_not_configured: "Pi-hole URL not configured. Open the script in Scriptable to set it up.",
 
     pw_title: "Save Pi-hole password",
     pw_msg: "Enter your Pi-hole admin password. It will be stored locally in the iOS Keychain.",
@@ -472,6 +474,11 @@ function resetPassword() {
 async function getOrAskPiholeBase(prefill) {
   if (!prefill && Keychain.contains(KEYCHAIN_BASE_KEY)) {
     return Keychain.get(KEYCHAIN_BASE_KEY);
+  }
+
+  // In widget mode we cannot show a dialog – fail fast with a clear message.
+  if (config.runsInWidget) {
+    throw new Error(t("url_not_configured"));
   }
 
   const a = new Alert();
