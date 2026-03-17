@@ -355,7 +355,7 @@ function clearSid() {
 }
 
 function sleep(ms) {
-  return new Promise(resolve => Timer.schedule(ms, false, resolve));
+  return new Promise(resolve => Timer.schedule(ms / 1000, false, resolve));
 }
 
 async function withRetry(fn, { retries = 1, delayMs = 300 } = {}) {
@@ -469,15 +469,15 @@ function resetPassword() {
 }
 
 // ---------------- Keychain base URL handling ----------------
-async function getOrAskPiholeBase() {
-  if (Keychain.contains(KEYCHAIN_BASE_KEY)) {
+async function getOrAskPiholeBase(prefill) {
+  if (!prefill && Keychain.contains(KEYCHAIN_BASE_KEY)) {
     return Keychain.get(KEYCHAIN_BASE_KEY);
   }
 
   const a = new Alert();
   a.title = t("url_title");
   a.message = t("url_msg");
-  a.addTextField(t("url_field"), "http://192.168.178.10");
+  a.addTextField(t("url_field"), prefill || "http://192.168.178.10");
   a.addAction(t("url_save"));
   a.addCancelAction(t("cancel"));
 
@@ -947,8 +947,9 @@ function classifyOffline(err) {
       await getOrAskPassword();
       clearSid(); // password changed -> session invalid
     } else if (action === 2) {
+      const oldUrl = Keychain.contains(KEYCHAIN_BASE_KEY) ? Keychain.get(KEYCHAIN_BASE_KEY) : "";
       resetPiholeBase();
-      PIHOLE_BASE = await getOrAskPiholeBase();
+      PIHOLE_BASE = await getOrAskPiholeBase(oldUrl);
       clearSid(); // URL changed -> old SID invalid
     } else if (action === 3) {
       clearCache();
