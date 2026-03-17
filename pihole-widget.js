@@ -14,7 +14,7 @@
 
 // ---------------- CONFIG ----------------
 // Prefer IP to avoid DNS issues on iOS
-let PIHOLE_BASE = ""; // set at runtime via Keychain (prompted on first run)
+const PIHOLE_BASE = "http://YOUR_LOCAL_PIHOLE_IP"; // e.g. "http://192.168.178.10"
 const STATS_ENDPOINT = "/api/stats/summary";
 
 const REFRESH_HOURS = 0.5;
@@ -31,7 +31,6 @@ const WARN_QUERY_DELTA_WINDOW_MIN = 30; // only evaluate delta if previous sampl
 
 // Storage keys
 const KEYCHAIN_PASSWORD_KEY = "pihole_admin_password_v1";
-const KEYCHAIN_BASE_KEY     = "pihole_base_url_v1";
 const CACHE_KEY = "pihole_widget_cache_v6_enhanced_v1";
 const KEYCHAIN_LANG_KEY = "pihole_widget_lang_v1"; // "auto" | "de" | "en"
 
@@ -61,15 +60,6 @@ const I18N = {
     choose_language_msg: "Welche Sprache soll das Widget nutzen?",
     language_set_to: "Sprache gesetzt: {{lang}}",
 
-    // url prompt
-    url_title: "Pi-hole URL",
-    url_msg: "Gib die Adresse deines Pi-hole ein (z. B. http://192.168.178.10). Sie wird in der Keychain gespeichert.",
-    url_field: "http://192.168.178.10",
-    url_save: "Speichern",
-    url_cancelled: "URL-Eingabe abgebrochen.",
-    url_empty: "Keine URL eingegeben.",
-    url_not_configured: "Pi-hole URL nicht konfiguriert. Öffne das Skript in Scriptable, um sie einzugeben.",
-
     // password prompt
     pw_title: "Pi-hole Passwort speichern",
     pw_msg: "Gib dein Pi-hole Admin-Passwort ein. Es wird lokal in der iOS-Keychain gespeichert.",
@@ -83,7 +73,6 @@ const I18N = {
     menu_msg: "Aktion auswählen",
     menu_refresh: "Aktualisieren (API abrufen)",
     menu_pw_change: "Passwort ändern (Keychain)",
-    menu_url_change: "Pi-hole URL ändern",
     menu_cache_clear: "Cache löschen",
     menu_language: "Sprache ändern",
     menu_abort: "Abbrechen",
@@ -154,14 +143,6 @@ const I18N = {
     choose_language_msg: "Which language should the widget use?",
     language_set_to: "Language set to: {{lang}}",
 
-    url_title: "Pi-hole URL",
-    url_msg: "Enter your Pi-hole address (e.g. http://192.168.178.10). It will be stored in the Keychain.",
-    url_field: "http://192.168.178.10",
-    url_save: "Save",
-    url_cancelled: "URL entry cancelled.",
-    url_empty: "No URL entered.",
-    url_not_configured: "Pi-hole URL not configured. Open the script in Scriptable to set it up.",
-
     pw_title: "Save Pi-hole password",
     pw_msg: "Enter your Pi-hole admin password. It will be stored locally in the iOS Keychain.",
     pw_field: "Password",
@@ -173,7 +154,6 @@ const I18N = {
     menu_msg: "Choose an action",
     menu_refresh: "Refresh (fetch API)",
     menu_pw_change: "Change password (Keychain)",
-    menu_url_change: "Change Pi-hole URL",
     menu_cache_clear: "Clear cache",
     menu_language: "Change language",
     menu_abort: "Cancel",
@@ -357,7 +337,7 @@ function clearSid() {
 }
 
 function sleep(ms) {
-  return new Promise(resolve => Timer.schedule(ms / 1000, false, resolve));
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function withRetry(fn, { retries = 1, delayMs = 300 } = {}) {
@@ -467,40 +447,6 @@ async function getOrAskPassword() {
 function resetPassword() {
   try {
     if (Keychain.contains(KEYCHAIN_PASSWORD_KEY)) Keychain.remove(KEYCHAIN_PASSWORD_KEY);
-  } catch (_) {}
-}
-
-// ---------------- Keychain base URL handling ----------------
-async function getOrAskPiholeBase(prefill) {
-  if (!prefill && Keychain.contains(KEYCHAIN_BASE_KEY)) {
-    return Keychain.get(KEYCHAIN_BASE_KEY);
-  }
-
-  // In widget mode we cannot show a dialog – fail fast with a clear message.
-  if (config.runsInWidget) {
-    throw new Error(t("url_not_configured"));
-  }
-
-  const a = new Alert();
-  a.title = t("url_title");
-  a.message = t("url_msg");
-  a.addTextField(t("url_field"), prefill || "http://192.168.178.10");
-  a.addAction(t("url_save"));
-  a.addCancelAction(t("cancel"));
-
-  const idx = await a.present();
-  if (idx === -1) throw new Error(t("url_cancelled"));
-
-  const url = (a.textFieldValue(0) || "").trim().replace(/\/$/, "");
-  if (!url) throw new Error(t("url_empty"));
-
-  Keychain.set(KEYCHAIN_BASE_KEY, url);
-  return url;
-}
-
-function resetPiholeBase() {
-  try {
-    if (Keychain.contains(KEYCHAIN_BASE_KEY)) Keychain.remove(KEYCHAIN_BASE_KEY);
   } catch (_) {}
 }
 
@@ -904,12 +850,11 @@ async function presentMenuAndReturnAction() {
   a.message = t("menu_msg");
   a.addAction(t("menu_refresh"));     // 0
   a.addAction(t("menu_pw_change"));   // 1
-  a.addAction(t("menu_url_change"));  // 2
-  a.addAction(t("menu_cache_clear")); // 3
-  a.addAction(t("menu_language"));    // 4
+  a.addAction(t("menu_cache_clear")); // 2
+  a.addAction(t("menu_language"));    // 3
   a.addCancelAction(t("menu_abort"));
   const idx = await a.present();
-  return idx; // 0 refresh, 1 reset pw, 2 change url, 3 clear cache, 4 language, -1 cancel
+  return idx; // 0 refresh, 1 reset pw, 2 clear cache, 3 language, -1 cancel
 }
 
 function emptySummary() {
@@ -954,13 +899,8 @@ function classifyOffline(err) {
       await getOrAskPassword();
       clearSid(); // password changed -> session invalid
     } else if (action === 2) {
-      const oldUrl = Keychain.contains(KEYCHAIN_BASE_KEY) ? Keychain.get(KEYCHAIN_BASE_KEY) : "";
-      resetPiholeBase();
-      PIHOLE_BASE = await getOrAskPiholeBase(oldUrl);
-      clearSid(); // URL changed -> old SID invalid
-    } else if (action === 3) {
       clearCache();
-    } else if (action === 4) {
+    } else if (action === 3) {
       await chooseLanguage();
     } else if (action === -1) {
       // show preview anyway with whatever cache exists
@@ -975,7 +915,6 @@ function classifyOffline(err) {
   let lastErr = null;
 
   try {
-    PIHOLE_BASE = await getOrAskPiholeBase();
     const password = await getOrAskPassword();
 
     // Fetch with robust retry + auto re-auth on 401
