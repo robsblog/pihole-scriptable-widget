@@ -355,7 +355,7 @@ function clearSid() {
 }
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(resolve => Timer.schedule(ms, false, resolve));
 }
 
 async function withRetry(fn, { retries = 1, delayMs = 300 } = {}) {
