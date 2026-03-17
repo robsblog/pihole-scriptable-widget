@@ -384,6 +384,7 @@ class HttpError extends Error {
 function isTransportError(err) {
   const msg = String(err?.message ?? err ?? "").toLowerCase();
   const needles = [
+    // English
     "timed out",
     "timeout",
     "offline",
@@ -398,6 +399,22 @@ function isTransportError(err) {
     "econn",
     "socket",
     "connection",
+    // German (iOS system-localised errors thrown by Scriptable/NSURLSession)
+    "zeitüberschreitung",
+    "zeitlimit",
+    "verbindung",
+    "netzwerk",
+    "nicht erreichbar",
+    "keine verbindung",
+    "host",
+    // French
+    "délai",
+    "connexion",
+    "réseau",
+    // Spanish
+    "tiempo de espera",
+    "conexión",
+    "red",
   ];
   return needles.some(n => msg.includes(n));
 }
